@@ -1,60 +1,85 @@
 // import the generated boilerplate
 varnish::boilerplate!();
 
-// even though we won't use it here, we still need to know what the context type is
-use varnish::vcl::ctx::Ctx;
+use rand::prelude::*;
+use varnish::vcl::ctx::{Ctx, LogTag};
+use varnish::vcl::vpriv::VPriv;
 
-// this import is only needed for tests
-#[cfg(test)]
-use varnish::vcl::ctx::TestCtx;
+varnish::vtc!(test01);
+const VCL_LOG: LogTag = LogTag::Any(varnish_sys::VSL_tag_e_SLT_VCL_Log);
 
-// we now implement both functionis from vmod.vcc, but with rust types.
-// Don't forget to make the function public with "pub" in front of them
-
-// we could skip the return, or even use n.is_even(), but let's pace ourselves
-pub fn is_even(_: &Ctx, n: i64) -> bool {
-    return n % 2 == 0;
+// makes sure a substring has the right length and is lowercase ascii
+fn check_block(s: &str, l: usize) -> bool {
+    s.chars()
+        .filter(|c| c.is_ascii_digit() || (*c >= 'a' && *c <= 'f'))
+        .count()
+        == l
 }
 
-// in vmod.vcc, n was an optional INT, so here it translates into a Option<i64>
-pub fn captain_obvious(_: &Ctx, opt: Option<i64>) -> String {
-    // we need to first "match" to know if a number was provided, if not,
-    // return a default message, otherwise, build a custom one
-    match opt {
-        // no need to return, we are the last expression of the function!
-        None => String::from("I was called without an argument"),
-        // pattern matching FTW!
-        Some(n) => format!("I was given {} as argument", n),
+// split a
+fn split_trace_parent(s: &str) -> Result<[&str; 4], &'static str> {
+    let v: Vec<&str> = s.split('-').collect();
+    if v.len() != 4
+        || v[0] != "00"
+        || !check_block(v[1], 32)
+        || !check_block(v[2], 16)
+        || !check_block(v[3], 2)
+    {
+        Err("something went wrong")
+    } else {
+        Ok([v[0], v[1], v[2], v[3]])
     }
 }
 
-// Write some more unit tests
-#[test]
-fn obviousness() {
-    let mut test_ctx = TestCtx::new(100);
-    let ctx = test_ctx.ctx();
-
-    assert_eq!(
-        "I was called without an argument",
-        captain_obvious(&ctx, None)
-    );
-    assert_eq!(
-        "I was given 975322 as argument",
-        captain_obvious(&ctx, Some(975322))
-    );
+// generate some random bytes
+fn random_fill(buf: &mut [u8]) {
+    for p in buf {
+        *p = random();
+    }
 }
 
-// Write some more unit tests
-#[test]
-fn even_test() {
-    // we don't use it, but we still need one
-    let mut test_ctx = TestCtx::new(100);
-    let ctx = test_ctx.ctx();
+// give an existing traceparent (valid or not), generate a new one
+fn new_span(ctx: &mut Ctx, top_traceparent: &str) -> String {
+    let mut span_id = [0; 8];
+    random_fill(&mut span_id);
 
-    assert_eq!(true, is_even(&ctx, 0));
-    assert_eq!(true, is_even(&ctx, 1024));
-    assert_eq!(false, is_even(&ctx, 421321));
+    // try to split the top trace
+    let trace = match split_trace_parent(&top_traceparent).ok() {
+        // tell the logger we have a parent, and generate a child
+        Some(stp) => {
+            ctx.log(
+                VCL_LOG,
+                &format!("otel-parent-context: {}", &top_traceparent),
+            );
+            format!("{}-{}-{}-{}", stp[0], stp[1], hex::encode(span_id), stp[3])
+        }
+        // otherwise, generate a new trace and span
+        None => {
+            let mut trace_id = [0; 16];
+            random_fill(&mut trace_id);
+            format!("00-{}-{}-00", hex::encode(trace_id), hex::encode(span_id))
+        }
+    };
+    ctx.log(VCL_LOG, &format!("otel-context: {}", &trace));
+    trace
 }
 
-// we also want to run test/test01.vtc
-varnish::vtc!(test01);
+// just create a new span, no questions asked
+pub fn new_bereq_span(ctx: &mut Ctx, s: &str) -> String {
+    new_span(ctx, s)
+}
+
+pub fn new_req_span(ctx: &mut Ctx, vp: &mut VPriv<String>, s: &str) -> Result<String, &'static str> {
+    // vp is a PRIV_TOP, we we only write to it when we are at the top
+    let top_traceparent = vp.as_ref().map(|s| s.as_str()).unwrap_or(s);
+
+    let trace = new_span(ctx, top_traceparent);
+    if unsafe {(*(*ctx.raw).req).esi_level} == 0 {
+        vp.store(trace.clone());
+    }
+    Ok(trace)
+}
+
+pub fn log(ctx: &mut Ctx, s: &str) {
+    ctx.log(VCL_LOG, &format!("otel-log: {} {}", ctx.raw.now, s));
+}

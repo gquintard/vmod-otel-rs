@@ -1,20 +1,40 @@
-# Copyright (c) 2021 Guillaume Quintard
+# Copyright (c) 2024 Guillaume Quintard
 # Author: Guillaume Quintard <guillaume.quintard@gmail.com>
 # (vmodtool requires this format.)
 
-$Module rs_template 3 "An example vmod"
+$Module otel_rs 3 "Propagate trace context information"
 
-We describe our vmod, all lines starting with a $ are special as they
-are used to generate boilerplate code, the others are regular documentation
+For this [page](https://www.w3.org/TR/trace-context/) for more...<puts on sunglasses>...context. YEEEEAAAHHH!
+Check [otel.vcl](./otel.vcl) for an integration example.
 
-The `rs_template` above matches the `vmod_rs_template` in `Cargo.toml`
+The main goal of this vmod is simply to:
+- propagate `traceparent` headers so they are transmitted upstream, to not break the trace
+- log them so that a log parser can push the trace data to a collector
 
-for more information, check https://varnish-cache.org/docs/trunk/reference/vmod.html
+$Function STRING new_req_span(PRIV_TOP, STRING)
+$Restrict vcl_recv
 
-$Function BOOL is_even(INT)
+Generate a child traceparent header from a parent header.
 
-This will tell you if a number is even, isn't that odd?
+``` vcl
+	set req.http.traceparent = otel_rs.new_req_span(req.http.traceparent);
+```
 
-$Function STRING captain_obvious([INT n])
+If the parent is valid, reuse the trace id and log it, otherwise just generate a new one randomly.
 
-Produce a string explaining which number you provided as argument
+Restarts should share the same span, so this should only be run once, when `req.restarts == 0`.
+However, subrequests depend on the main requests, so we use the `PRIV_TOP` to write and read the top traceparent header after generating it.
+
+
+$Function STRING new_bereq_span(STRING)
+$Restrict vcl_backend_fetch
+
+Like `new_req_span` but simple: just generate a new header from a parent.
+
+``` vcl
+	set bereq.http.traceparent = otel_rs.new_bereq_span(bereq.http.traceparent);
+```
+
+$Function VOID log(STRING)
+
+Push a `VCL_Log` record to VSL, prefixed with `otel-log: $TIMESTAMP `. Those records will be used by the log parser to enrich the trace.

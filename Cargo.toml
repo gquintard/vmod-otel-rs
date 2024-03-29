@@ -1,14 +1,16 @@
 [package]
-name = "vmod_rs_template"
+name = "vmod_otel_rs"
 version = "0.0.1"
 edition = "2021"
 
 [build-dependencies]
-varnish = "0.0.5"
+varnish = { git = "https://github.com/gquintard/varnish-rs.git", branch = "main" } 
 
 [dependencies]
-varnish = "0.0.5"
-varnish-sys = "0.0.5"
+hex = "0.4.3"
+rand = "0.8.5"
+varnish = { git = "https://github.com/gquintard/varnish-rs.git", branch = "main" } 
+varnish-sys = { git = "https://github.com/gquintard/varnish-rs.git", branch = "main" } 
 
 [lib]
 crate-type = ["cdylib"]
